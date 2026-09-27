@@ -1,0 +1,1229 @@
+diff --git a/Setup_CMP30HX_LinuxAIO.sh b/Setup_CMP30HX_LinuxAIO.sh
+index 121ee3d..704fca9 100644
+--- a/Setup_CMP30HX_LinuxAIO.sh
++++ b/Setup_CMP30HX_LinuxAIO.sh
+@@ -267,6 +267,25 @@ disable_aspm() {
+         fi
+     done
+     echo -e "      ${C_GREEN}[OK]${C_RESET} Da dat power/control=on cho ${count} thiet bi PCI (chong ha link khi idle)"
++
++    # 3. Them pcie_aspm=force vao GRUB neu chua co
++    if [[ -f "/etc/default/grub" ]]; then
++        if ! grep -q "pcie_aspm=force" /etc/default/grub; then
++            echo -e "      [*] Dang them pcie_aspm=force vao /etc/default/grub..."
++            sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="/GRUB_CMDLINE_LINUX_DEFAULT="pcie_aspm=force /g' /etc/default/grub
++            if command -v update-grub >/dev/null 2>&1; then
++                update-grub >/dev/null 2>&1
++                echo -e "      ${C_GREEN}[OK]${C_RESET} Da cap nhat GRUB (update-grub)"
++            elif command -v grub2-mkconfig >/dev/null 2>&1; then
++                grub2-mkconfig -o /boot/grub2/grub.cfg >/dev/null 2>&1
++                echo -e "      ${C_GREEN}[OK]${C_RESET} Da cap nhat GRUB (grub2-mkconfig)"
++            else
++                echo -e "      ${C_YELLOW}[!]${C_RESET} Da them vao /etc/default/grub nhung khong tim thay cong cu cap nhat GRUB."
++            fi
++        else
++            echo -e "      ${C_GREEN}[OK]${C_RESET} GRUB da co san pcie_aspm=force"
++        fi
++    fi
+ }
+ 
+ # ------------------------------------------------------------------------------
+@@ -286,98 +305,25 @@ inject_bar0_mmio() {
+         return 0
+     fi
+ 
+-    if ! command -v python3 >/dev/null 2>&1; then
+-        echo -e "      ${C_YELLOW}[!] Khong co python3 de ghi struct mmap BAR0, chuyen sang cau hinh setpci.${C_RESET}"
++    if ! command -v gcc >/dev/null 2>&1; then
++        echo -e "      ${C_YELLOW}[!] Khong co gcc de bien dich mmio_injector, chuyen sang cau hinh setpci.${C_RESET}"
+         return 0
+     fi
+ 
++    local injector_dir="$(dirname "$0")/linux-mmio"
++    local injector_src="${injector_dir}/mmio_injector.c"
++    local injector_bin="${injector_dir}/mmio_injector"
++
++    if [[ ! -x "${injector_bin}" ]]; then
++        echo -e "      [*] Dang bien dich mmio_injector.c..."
++        if ! gcc -O2 -o "${injector_bin}" "${injector_src}"; then
++            echo -e "      ${C_YELLOW}[!] Bien dich that bai, chuyen sang cau hinh setpci.${C_RESET}"
++            return 0
++        fi
++    fi
++
+     echo -e "      [*] Dang kiem tra va ghi de thanh ghi BAR0 MMIO (TU116 XVE)..."
+-    python3 - <<EOF
+-import sys, os, struct, mmap
+-
+-res_path = "${res0}"
+-fd = -1
+-mm = None
+-try:
+-    fd = os.open(res_path, os.O_RDWR | os.O_SYNC)
+-    # Thu dung mmap de ghi dung memory-mapped IO (atomic 32-bit Dword)
+-    try:
+-        mm = mmap.mmap(fd, 0x100000, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
+-    except Exception:
+-        mm = None
+-
+-    def read_u32(off):
+-        if mm is not None:
+-            return struct.unpack_from('<I', mm, off)[0]
+-        os.lseek(fd, off, os.SEEK_SET)
+-        raw = os.read(fd, 4)
+-        if len(raw) < 4:
+-            raise IOError("EOF reading offset 0x%X" % off)
+-        return struct.unpack('<I', raw)[0]
+-
+-    def write_u32(off, val):
+-        if mm is not None:
+-            struct.pack_into('<I', mm, off, val)
+-            return
+-        os.lseek(fd, off, os.SEEK_SET)
+-        os.write(fd, struct.pack('<I', val))
+-
+-    boot0 = read_u32(0x0)
+-    if (boot0 & 0xFF000000) != 0x16000000:
+-        print(f"      [!] BOOT_0=0x{boot0:08X} khong phai TU116/TU10x (ky vong 0x16xxxxxx), bo qua inject MMIO.")
+-        sys.exit(0)
+-
+-    method = "mmap" if mm is not None else "lseek"
+-    print(f"      [OK] BAR0 hop le (BOOT_0=0x{boot0:08X}, Nhan TU116, che do {method}).")
+-
+-    # 1. Ghi XVE hardware override va cau hinh (tuong dong Windows 40hxcore)
+-    # 0x0008841C: PRIV_MISC_1 (tat write protection shadow registers)
+-    write_u32(0x0008841C, 0xE0B42D00)
+-    # 0x0008872C: XVE_OVR = 6 (Gen2 override)
+-    write_u32(0x0008872C, 0x00000006)
+-    # 0x0008C040: LINK_CONFIG_0
+-    write_u32(0x0008C040, 0x80085800)
+-    # 0x0008C1C0: PL_LINK_RATE (bit 20 = 0, Power Limit Gen2 link rate)
+-    write_u32(0x0008C1C0, 0x00240036)
+-    # 0x0008C2C0: CYA_0
+-    write_u32(0x0008C2C0, 0x068731B3)
+-    # 0x0008872C: XVE_OVR confirm
+-    write_u32(0x0008872C, 0x00000006)
+-
+-    # 2. Ghi thanh ghi PCIe Capability shadow
+-    # LNKCAP @ 0x088084 (dat Max Link Speed = Gen2)
+-    orig_cap = read_u32(0x00088084)
+-    write_u32(0x00088084, (orig_cap & 0xFFFFFFF0) | 2)
+-
+-    # LNKCAP2 @ 0x0880A4
+-    write_u32(0x000880A4, 0x00000006)
+-
+-    # XVE_F0 @ 0x0880F0
+-    write_u32(0x000880F0, 0x00000006)
+-
+-    # LNKCTL2 @ 0x0880A8 (TLS = Gen2)
+-    orig_ctl2 = read_u32(0x000880A8)
+-    write_u32(0x000880A8, (orig_ctl2 & 0xFFFFFFF0) | 2)
+-
+-    # 3. Kiem tra PHY Lane 0 status (0x08C4B0)
+-    try:
+-        phy_l0 = read_u32(0x0008C4B0)
+-        phy_desc = "Gen2 (5.0 GT/s)" if (phy_l0 & 0xFF000000) == 0x50000000 else ("Gen1 (2.5 GT/s)" if (phy_l0 & 0xFF000000) == 0x25000000 else "Khac")
+-        print(f"      [OK] Da inject MMIO BAR0. PHY Lane 0: 0x{phy_l0:08X} ({phy_desc}).")
+-    except Exception:
+-        print("      [OK] Da inject thanh ghi BAR0 MMIO (XVE_OVR, LNKCAP/CTL2).")
+-
+-except Exception as e:
+-    print(f"      [!] Khong the can thiep BAR0 MMIO: {e}")
+-    print("          (Driver nvidia co the dang khoa resource0; se tiep tuc dieu khien qua Root Port & setpci).")
+-finally:
+-    if mm is not None:
+-        try: mm.close()
+-        except Exception: pass
+-    if fd >= 0:
+-        try: os.close(fd)
+-        except Exception: pass
+-EOF
++    "${injector_bin}" "${res0}"
+ }
+ 
+ # ------------------------------------------------------------------------------
+diff --git a/Setup_CMP30HX_WindowsAIO.bat b/Setup_CMP30HX_WindowsAIO.bat
+index 1ff803c..edd4875 100644
+--- a/Setup_CMP30HX_WindowsAIO.bat
++++ b/Setup_CMP30HX_WindowsAIO.bat
+@@ -313,7 +313,7 @@ if not exist "%FINAL_RUNNER%" (
+         echo where nvidia-smi ^>nul 2^>^&1 ^&^& nvidia-smi -pm 1 ^>nul 2^>^&1
+         echo "40HXInstaller.exe" -gen2-30hx -silent
+         echo where nvidia-smi ^>nul 2^>^&1 ^&^& nvidia-smi -pm 1 ^>nul 2^>^&1
+-        echo powershell -noProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 15; $statusFile = [System.IO.Path]::Combine($env:ProgramData, '40HXUnlock\gen2_status.txt'); if (Test-Path $statusFile) { $c = Get-Content $statusFile -Raw; if ($c -match 'GPU TLS=Gen1|chua dat|chưa đạt') { $devs = Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | Where-Object { $_.HardwareID -match 'VEN_10DE&(DEV_2189|DEV_1F0B)' }; foreach ($d in $devs) { try { & pnputil /restart-device $d.InstanceId >$null 2>&1 } catch {}; try { Disable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 800; Enable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction SilentlyContinue } catch {}; try { $st = (Get-PnpDevice -InstanceId $d.InstanceId -ErrorAction SilentlyContinue).Status; if ($st -ne 'OK') { Enable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction SilentlyContinue } } catch {} }; Start-Sleep -Seconds 2; try { Restart-Service NVDisplay.ContainerLocalSystem -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 1 } catch {}; Start-Process -FilePath (Join-Path $pwd.Path '40HXInstaller.exe') -ArgumentList '-gen2-30hx -silent' -Wait; try { & 'nvidia-smi' -pm 1 } catch {} } }" ^>nul 2^>^&1
++        echo powershell -NoProfile -ExecutionPolicy Bypass -File "%%~dp0scripts\Wait-And-Reset.ps1" ^>nul 2^>^&1
+         echo sc stop WinRing0_1_2_0 ^>nul 2^>^&1
+         echo sc delete WinRing0_1_2_0 ^>nul 2^>^&1
+         echo sc stop ThrottleStop ^>nul 2^>^&1
+@@ -346,9 +346,9 @@ echo [1/6] Dang tat Fast Startup, Hybrid Sleep va PCIe ASPM toan he thong...
+ powercfg -h off >nul 2>&1
+ reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power" /v "HiberbootEnabled" /t REG_DWORD /d 0 /f >nul 2>&1
+ 
+-powershell -NoProfile -ExecutionPolicy Bypass -Command "$schemes = powercfg -list | ForEach-Object { if ($_ -match '([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})') { $matches[1] } }; foreach ($s in $schemes) { powercfg -setacvalueindex $s SUB_PCIEXPRESS ASPM 0 2>$null; powercfg -setdcvalueindex $s SUB_PCIEXPRESS ASPM 0 2>$null; powercfg -setacvalueindex $s SUB_SLEEP HYBRIDSLEEP 0 2>$null; powercfg -setdcvalueindex $s SUB_SLEEP HYBRIDSLEEP 0 2>$null }; powercfg -setactive SCHEME_CURRENT 2>$null" >nul 2>&1
++powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Disable-ASPM.ps1" >nul 2>&1
+ 
+-powershell -NoProfile -ExecutionPolicy Bypass -Command "$base = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}'; Get-ChildItem $base -ErrorAction SilentlyContinue | ForEach-Object { $p = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue; if ($p.ProviderName -match 'NVIDIA' -or $p.DriverDesc -match 'NVIDIA|CMP') { Set-ItemProperty -Path $_.PSPath -Name 'DisableAspm' -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue; Set-ItemProperty -Path $_.PSPath -Name 'RMDisableLinkDownshift' -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue } }" >nul 2>&1
++powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Disable-NvidiaASPM.ps1" >nul 2>&1
+ 
+ where nvidia-smi >nul 2>&1 && nvidia-smi -pm 1 >nul 2>&1
+ sc config NVDisplay.ContainerLocalSystem start= auto >nul 2>&1
+@@ -416,7 +416,7 @@ set "FINAL_EXE=%FINAL_RUNNER%"
+ if not exist "%FINAL_EXE%" set "FINAL_EXE=%FINAL_INSTALLER%"
+ set "FINAL_WD=%FINAL_DIR%"
+ 
+-powershell -NoProfile -ExecutionPolicy Bypass -Command "$exe=$env:FINAL_EXE; $dir=$env:FINAL_WD; if (-not [IO.Path]::IsPathRooted($exe)) { throw 'Duong dan installer khong hop le' }; $q=[char]34; $action = if ($exe -match '\.bat$') { New-ScheduledTaskAction -Execute $env:ComSpec -Argument ('/c ' + $q + $exe + $q) -WorkingDirectory $dir } else { New-ScheduledTaskAction -Execute $exe -Argument '-gen2-30hx -silent' -WorkingDirectory $dir }; $t1 = New-ScheduledTaskTrigger -AtStartup; $t1.Delay = 'PT15S'; $t2 = New-ScheduledTaskTrigger -AtLogOn; $t2.Delay = 'PT5S'; $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Minutes 5); $principal = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\SYSTEM' -LogonType ServiceAccount -RunLevel Highest; Register-ScheduledTask -TaskName 'CMP30HX_Gen2_Unlock' -Action $action -Trigger @($t1, $t2) -Settings $settings -Principal $principal -Force; try { $srv = New-Object -ComObject 'Schedule.Service'; $srv.Connect(); $task = $srv.GetFolder('\').GetTask('CMP30HX_Gen2_Unlock'); $def = $task.Definition; $tEvent = $def.Triggers.Create(0); $tEvent.Subscription = '<QueryList><Query Id=''0'' Path=''System''><Select Path=''System''>*[System[Provider[@Name=''Microsoft-Windows-Power-Troubleshooter''] and EventID=1]]</Select></Query></QueryList>'; $tEvent.Delay = 'PT3S'; $tEvent.Enabled = $true; $srv.GetFolder('\').RegisterTaskDefinition('CMP30HX_Gen2_Unlock', $def, 4, $null, $null, 5, $null) } catch {}" >nul 2>&1
++powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Register-UnlockTask.ps1" -ExePath "%FINAL_EXE%" -WorkingDirectory "%FINAL_WD%" >nul 2>&1
+ 
+ if not errorlevel 1 set "TASK_OK=1"
+ if "%TASK_OK%"=="1" schtasks /query /tn "CMP30HX_Gen2_Unlock" >nul 2>&1 || set "TASK_OK=0"
+@@ -449,7 +449,7 @@ if "%HAS_VANGUARD%"=="1" (
+     echo       [*] Phat hien Riot Vanguard tren he thong. Che do tuong thich Anti-Cheat da san sang.
+ )
+ 
+-powershell -NoProfile -ExecutionPolicy Bypass -Command "$reg = 'HKCU:\Software\Microsoft\DirectX\UserGpuPreferences'; if (-not (Test-Path $reg)) { New-Item -Path $reg -Force | Out-Null }; $found = 0; $drives = (Get-PSDrive -PSProvider FileSystem).Root; foreach ($d in $drives) { foreach ($sub in @('Riot Games\VALORANT\live\ShooterGame\Binaries\Win64\VALORANT-Win64-Shipping.exe', 'Riot Games\League of Legends\Game\League of Legends.exe')) { $p = Join-Path $d $sub; if (Test-Path $p) { Set-ItemProperty -Path $reg -Name $p -Value 'GpuPreference=2;' -ErrorAction SilentlyContinue; $found++ } } }; if ($found -eq 0) { Set-ItemProperty -Path $reg -Name (Join-Path $env:SystemDrive 'Riot Games\VALORANT\live\ShooterGame\Binaries\Win64\VALORANT-Win64-Shipping.exe') -Value 'GpuPreference=2;' -ErrorAction SilentlyContinue; Set-ItemProperty -Path $reg -Name (Join-Path $env:SystemDrive 'Riot Games\League of Legends\Game\League of Legends.exe') -Value 'GpuPreference=2;' -ErrorAction SilentlyContinue }" >nul 2>&1
++powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Set-GpuPreference.ps1" >nul 2>&1
+ exit /b 0
+ 
+ 
+@@ -632,7 +632,7 @@ exit /b 0
+ 
+ :PnpSoftReset
+ echo       [*] Dang tu dong thuc hien chu trinh Soft Reset [Disable - Enable qua PnP]...
+-powershell -NoProfile -ExecutionPolicy Bypass -Command "$devs = Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | Where-Object { $_.HardwareID -match 'VEN_10DE&(DEV_2189|DEV_1F0B)' }; if ($devs) { foreach ($d in $devs) { try { & pnputil /restart-device $d.InstanceId >$null 2>&1 } catch {}; try { Disable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 800; Enable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction SilentlyContinue } catch {}; try { $st = (Get-PnpDevice -InstanceId $d.InstanceId -ErrorAction SilentlyContinue).Status; if ($st -ne 'OK') { Enable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction SilentlyContinue } } catch {} }; Start-Sleep -Seconds 2; try { sc.exe config NVDisplay.ContainerLocalSystem start= auto | Out-Null; Restart-Service NVDisplay.ContainerLocalSystem -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 1; $s = Get-Service -Name NVDisplay.ContainerLocalSystem -ErrorAction SilentlyContinue; if ($s -and $s.Status -ne 'Running') { Start-Service NVDisplay.ContainerLocalSystem -ErrorAction SilentlyContinue } } catch {} } else { Write-Host 'Khong tim thay Instance ID qua PnP' }" >nul 2>&1
++powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Restart-NvidiaGPU.ps1" >nul 2>&1
+ call :EnsureNvidiaControlPanelHealthy
+ exit /b 0
+ 
+@@ -984,7 +984,7 @@ echo ================================================================
+ echo.
+ echo [*] Dang kiem tra va khoi phuc service NVDisplay.ContainerLocalSystem...
+ sc config NVDisplay.ContainerLocalSystem start= auto >nul 2>&1
+-powershell -NoProfile -ExecutionPolicy Bypass -Command "Restart-Service -Name 'NVDisplay.ContainerLocalSystem' -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 1; $s = Get-Service -Name 'NVDisplay.ContainerLocalSystem' -ErrorAction SilentlyContinue; if ($s -and $s.Status -ne 'Running') { Start-Service -Name 'NVDisplay.ContainerLocalSystem' -ErrorAction SilentlyContinue }" >nul 2>&1
++powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Restart-NVDisplay.ps1" >nul 2>&1
+ echo       [OK] Service NVDisplay.ContainerLocalSystem da duoc dat ve tu dong [Auto] va khoi chay.
+ echo.
+ echo [*] Dang dang ky lai Desktop Context Menu Handler cho NVIDIA Control Panel...
+diff --git a/Setup_ReBar_CMP30HX.bat b/Setup_ReBar_CMP30HX.bat
+index ccfb9ab..7d1efa0 100644
+--- a/Setup_ReBar_CMP30HX.bat
++++ b/Setup_ReBar_CMP30HX.bat
+@@ -162,11 +162,9 @@ set "MB_PROD=Unknown"
+ set "MB_BIOS=Unknown"
+ set "IS_LAPTOP=0"
+ 
+-for /f "usebackq delims=" %%A in (`powershell -NoProfile -Command "(Get-CimInstance Win32_ComputerSystem).Manufacturer"`) do set "SYS_MANU=%%A"
+-for /f "usebackq delims=" %%A in (`powershell -NoProfile -Command "(Get-CimInstance Win32_ComputerSystem).Model"`) do set "SYS_MODEL=%%A"
+-for /f "usebackq delims=" %%A in (`powershell -NoProfile -Command "(Get-CimInstance Win32_BaseBoard).Manufacturer"`) do set "MB_MANU=%%A"
+-for /f "usebackq delims=" %%A in (`powershell -NoProfile -Command "(Get-CimInstance Win32_BaseBoard).Product"`) do set "MB_PROD=%%A"
+-for /f "usebackq delims=" %%A in (`powershell -NoProfile -Command "(Get-CimInstance Win32_BIOS).SMBIOSBIOSVersion"`) do set "MB_BIOS=%%A"
++for /f "usebackq tokens=1* delims==" %%A in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Get-SysInfo.ps1"`) do (
++    set "%%A=%%B"
++)
+ 
+ echo    - He thong   : !SYS_MANU! - Model: !SYS_MODEL!
+ echo    - Bo mach chu: !MB_MANU! - Model: !MB_PROD! [BIOS: !MB_BIOS!]
+@@ -194,8 +192,7 @@ if "!MOCK_LAPTOP!"=="1" (
+     set "DETECTED_GPUS= [NVIDIA CMP 30HX]"
+ ) else (
+     rem Kiem tra 4 lop nhan dien Laptop thuc te
+-    for /f "usebackq delims=" %%A in (`powershell -NoProfile -Command "(Get-CimInstance Win32_ComputerSystem).PCSystemType"`) do if "%%A"=="2" set "IS_LAPTOP=1"
+-    for /f "usebackq delims=" %%A in (`powershell -NoProfile -Command "[bool](Get-CimInstance Win32_Battery)"`) do if /i "%%A"=="True" set "IS_LAPTOP=1"
++    rem IS_LAPTOP da duoc lay tu Get-SysInfo.ps1
+     echo "!SYS_MODEL! !MB_PROD!" | findstr /i "FA506 G513 G533 GL553 Nitro Legion Victus Laptop Notebook Book Portable TUF ROG Zephyrus Strix Thin Stealth Blade Omen Pavilion Inspiron Latitude Precision XPS Yoga ThinkPad IdeaPad" >nul 2>&1 && set "IS_LAPTOP=1"
+ )
+ 
+@@ -418,7 +415,7 @@ copy /y "%TOOL_DIR%\Enable_ReBAR_Turing.nip" "%REBAR_APP_DIR%\" >nul 2>&1
+     echo exit /b 0
+ ) > "%REBAR_RUNNER%"
+ 
+-powershell -NoProfile -ExecutionPolicy Bypass -Command "$taskName='NVIDIA_ReBAR_Global_Profile'; $dir=$env:REBAR_APP_DIR; $bat=$env:REBAR_RUNNER; $action = New-ScheduledTaskAction -Execute $env:ComSpec -Argument ('/c `\"' + $bat + '`\"') -WorkingDirectory $dir; $t1 = New-ScheduledTaskTrigger -AtStartup; $t1.Delay = 'PT15S'; $t2 = New-ScheduledTaskTrigger -AtLogOn; $t2.Delay = 'PT5S'; $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 5); $principal = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\SYSTEM' -LogonType ServiceAccount -RunLevel Highest; Register-ScheduledTask -TaskName $taskName -Action $action -Trigger @($t1, $t2) -Settings $settings -Principal $principal -Force | Out-Null; try { $srv = New-Object -ComObject 'Schedule.Service'; $srv.Connect(); $task = $srv.GetFolder('\').GetTask($taskName); $def = $task.Definition; $tEvent = $def.Triggers.Create(0); $tEvent.Subscription = '<QueryList><Query Id=''0'' Path=''System''><Select Path=''System''>*[System[Provider[@Name=''Microsoft-Windows-Power-Troubleshooter''] and EventID=1]]</Select></Query></QueryList>'; $tEvent.Delay = 'PT3S'; $tEvent.Enabled = $true; $srv.GetFolder('\').RegisterTaskDefinition($taskName, $def, 4, $null, $null, 5, $null) | Out-Null } catch {}" >nul 2>&1
++powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Register-ReBarTask.ps1" -TaskName "NVIDIA_ReBAR_Global_Profile" -BatPath "%REBAR_RUNNER%" -WorkingDirectory "%REBAR_APP_DIR%" >nul 2>&1
+ 
+ reg add "HKLM\Software\Microsoft\Windows\CurrentVersion\Run" /v "NVIDIA_ReBAR_Profile" /t REG_SZ /d "\"%REBAR_RUNNER%\"" /f >nul 2>&1
+ reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v "NVIDIA_ReBAR_Profile" /t REG_SZ /d "\"%REBAR_RUNNER%\"" /f >nul 2>&1
+diff --git a/linux-mmio/mmio_injector.c b/linux-mmio/mmio_injector.c
+new file mode 100644
+index 0000000..ac64afa
+--- /dev/null
++++ b/linux-mmio/mmio_injector.c
+@@ -0,0 +1,84 @@
++#include <stdio.h>
++#include <stdlib.h>
++#include <stdint.h>
++#include <fcntl.h>
++#include <sys/mman.h>
++#include <unistd.h>
++#include <string.h>
++#include <errno.h>
++
++uint32_t read_u32(void *map_base, off_t offset) {
++    return *((volatile uint32_t *)((char *)map_base + offset));
++}
++
++void write_u32(void *map_base, off_t offset, uint32_t value) {
++    *((volatile uint32_t *)((char *)map_base + offset)) = value;
++}
++
++int main(int argc, char *argv[]) {
++    if (argc < 2) {
++        fprintf(stderr, "Usage: %s <sysfs_resource_path>\n", argv[0]);
++        return 1;
++    }
++
++    const char *res_path = argv[1];
++    int fd = open(res_path, O_RDWR | O_SYNC);
++    if (fd < 0) {
++        fprintf(stderr, "      [!] Failed to open %s: %s\n", res_path, strerror(errno));
++        return 1;
++    }
++
++    size_t map_size = 0x100000;
++    void *map_base = mmap(0, map_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++    if (map_base == MAP_FAILED) {
++        fprintf(stderr, "      [!] Failed to mmap %s: %s\n", res_path, strerror(errno));
++        close(fd);
++        return 1;
++    }
++
++    uint32_t boot0 = read_u32(map_base, 0x0);
++    if ((boot0 & 0xFF000000) != 0x16000000) {
++        printf("      [!] BOOT_0=0x%08X khong phai TU116/TU10x (ky vong 0x16xxxxxx), bo qua inject MMIO.\n", boot0);
++        munmap(map_base, map_size);
++        close(fd);
++        return 0; // Success, just skipped
++    }
++
++    printf("      [OK] BAR0 hop le (BOOT_0=0x%08X, Nhan TU116, che do mmap C binary).\n", boot0);
++
++    // 0x0008841C: PRIV_MISC_1
++    write_u32(map_base, 0x0008841C, 0xE0B42D00);
++    // 0x0008872C: XVE_OVR = 6
++    write_u32(map_base, 0x0008872C, 0x00000006);
++    // 0x0008C040: LINK_CONFIG_0
++    write_u32(map_base, 0x0008C040, 0x80085800);
++    // 0x0008C1C0: PL_LINK_RATE
++    write_u32(map_base, 0x0008C1C0, 0x00240036);
++    // 0x0008C2C0: CYA_0
++    write_u32(map_base, 0x0008C2C0, 0x068731B3);
++    // 0x0008872C: XVE_OVR confirm
++    write_u32(map_base, 0x0008872C, 0x00000006);
++
++    uint32_t orig_cap = read_u32(map_base, 0x00088084);
++    write_u32(map_base, 0x00088084, (orig_cap & 0xFFFFFFF0) | 2);
++
++    write_u32(map_base, 0x000880A4, 0x00000006);
++    write_u32(map_base, 0x000880F0, 0x00000006);
++
++    uint32_t orig_ctl2 = read_u32(map_base, 0x000880A8);
++    write_u32(map_base, 0x000880A8, (orig_ctl2 & 0xFFFFFFF0) | 2);
++
++    uint32_t phy_l0 = read_u32(map_base, 0x0008C4B0);
++    const char *phy_desc = "Khac";
++    if ((phy_l0 & 0xFF000000) == 0x50000000) {
++        phy_desc = "Gen2 (5.0 GT/s)";
++    } else if ((phy_l0 & 0xFF000000) == 0x25000000) {
++        phy_desc = "Gen1 (2.5 GT/s)";
++    }
++
++    printf("      [OK] Da inject MMIO BAR0. PHY Lane 0: 0x%08X (%s).\n", phy_l0, phy_desc);
++
++    munmap(map_base, map_size);
++    close(fd);
++    return 0;
++}
+diff --git a/scripts/Disable-ASPM.ps1 b/scripts/Disable-ASPM.ps1
+new file mode 100644
+index 0000000..14cf2d2
+--- /dev/null
++++ b/scripts/Disable-ASPM.ps1
+@@ -0,0 +1,14 @@
++$schemes = powercfg -list | ForEach-Object {
++    if ($_ -match '([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})') {
++        $matches[1]
++    }
++}
++
++foreach ($s in $schemes) {
++    powercfg -setacvalueindex $s SUB_PCIEXPRESS ASPM 0 2>$null
++    powercfg -setdcvalueindex $s SUB_PCIEXPRESS ASPM 0 2>$null
++    powercfg -setacvalueindex $s SUB_SLEEP HYBRIDSLEEP 0 2>$null
++    powercfg -setdcvalueindex $s SUB_SLEEP HYBRIDSLEEP 0 2>$null
++}
++
++powercfg -setactive SCHEME_CURRENT 2>$null
+diff --git a/scripts/Disable-NvidiaASPM.ps1 b/scripts/Disable-NvidiaASPM.ps1
+new file mode 100644
+index 0000000..1c0b044
+--- /dev/null
++++ b/scripts/Disable-NvidiaASPM.ps1
+@@ -0,0 +1,9 @@
++$base = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}'
++
++Get-ChildItem $base -ErrorAction SilentlyContinue | ForEach-Object {
++    $p = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
++    if ($p.ProviderName -match 'NVIDIA' -or $p.DriverDesc -match 'NVIDIA|CMP') {
++        Set-ItemProperty -Path $_.PSPath -Name 'DisableAspm' -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
++        Set-ItemProperty -Path $_.PSPath -Name 'RMDisableLinkDownshift' -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
++    }
++}
+diff --git a/scripts/Get-SysInfo.ps1 b/scripts/Get-SysInfo.ps1
+new file mode 100644
+index 0000000..7c759d4
+--- /dev/null
++++ b/scripts/Get-SysInfo.ps1
+@@ -0,0 +1,24 @@
++$ErrorActionPreference = "SilentlyContinue"
++
++$cs = Get-CimInstance Win32_ComputerSystem
++$bb = Get-CimInstance Win32_BaseBoard
++$bios = Get-CimInstance Win32_BIOS
++$batt = Get-CimInstance Win32_Battery
++
++$sysManu = $cs.Manufacturer
++$sysModel = $cs.Model
++$mbManu = $bb.Manufacturer
++$mbProd = $bb.Product
++$mbBios = $bios.SMBIOSBIOSVersion
++
++$isLaptop = 0
++if ($cs.PCSystemType -eq 2 -or $batt) {
++    $isLaptop = 1
++}
++
++Write-Output "SYS_MANU=$sysManu"
++Write-Output "SYS_MODEL=$sysModel"
++Write-Output "MB_MANU=$mbManu"
++Write-Output "MB_PROD=$mbProd"
++Write-Output "MB_BIOS=$mbBios"
++Write-Output "IS_LAPTOP=$isLaptop"
+diff --git a/scripts/Register-ReBarTask.ps1 b/scripts/Register-ReBarTask.ps1
+new file mode 100644
+index 0000000..c1e58fd
+--- /dev/null
++++ b/scripts/Register-ReBarTask.ps1
+@@ -0,0 +1,37 @@
++param (
++    [string]$TaskName,
++    [string]$BatPath,
++    [string]$WorkingDirectory
++)
++
++$action = New-ScheduledTaskAction -Execute $env:ComSpec -Argument ("/c `"$BatPath`"") -WorkingDirectory $WorkingDirectory
++
++$t1 = New-ScheduledTaskTrigger -AtStartup
++$t1.Delay = 'PT15S'
++
++$t2 = New-ScheduledTaskTrigger -AtLogOn
++$t2.Delay = 'PT5S'
++
++$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
++    -StartWhenAvailable -MultipleInstances IgnoreNew `
++    -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
++
++$principal = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\SYSTEM' -LogonType ServiceAccount -RunLevel Highest
++
++Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger @($t1, $t2) -Settings $settings -Principal $principal -Force | Out-Null
++
++try {
++    $srv = New-Object -ComObject 'Schedule.Service'
++    $srv.Connect()
++    $task = $srv.GetFolder('\').GetTask($TaskName)
++    $def = $task.Definition
++    
++    $tEvent = $def.Triggers.Create(0)
++    $tEvent.Subscription = '<QueryList><Query Id="0" Path="System"><Select Path="System">*[System[Provider[@Name="Microsoft-Windows-Power-Troubleshooter"] and EventID=1]]</Select></Query></QueryList>'
++    $tEvent.Delay = 'PT3S'
++    $tEvent.Enabled = $true
++    
++    $srv.GetFolder('\').RegisterTaskDefinition($TaskName, $def, 4, $null, $null, 5, $null) | Out-Null
++} catch {
++    Write-Warning "Failed to add Event trigger: $_"
++}
+diff --git a/scripts/Register-UnlockTask.ps1 b/scripts/Register-UnlockTask.ps1
+new file mode 100644
+index 0000000..ba45504
+--- /dev/null
++++ b/scripts/Register-UnlockTask.ps1
+@@ -0,0 +1,45 @@
++param (
++    [string]$ExePath,
++    [string]$WorkingDirectory
++)
++
++if (-not [IO.Path]::IsPathRooted($ExePath)) {
++    throw 'Duong dan installer khong hop le'
++}
++
++$action = if ($ExePath -match '\.bat$') {
++    New-ScheduledTaskAction -Execute $env:ComSpec -Argument ("/c `"$ExePath`"") -WorkingDirectory $WorkingDirectory
++} else {
++    New-ScheduledTaskAction -Execute $ExePath -Argument '-gen2-30hx -silent' -WorkingDirectory $WorkingDirectory
++}
++
++$t1 = New-ScheduledTaskTrigger -AtStartup
++$t1.Delay = 'PT15S'
++
++$t2 = New-ScheduledTaskTrigger -AtLogOn
++$t2.Delay = 'PT5S'
++
++$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
++    -StartWhenAvailable -MultipleInstances IgnoreNew `
++    -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) `
++    -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
++
++$principal = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\SYSTEM' -LogonType ServiceAccount -RunLevel Highest
++
++Register-ScheduledTask -TaskName 'CMP30HX_Gen2_Unlock' -Action $action -Trigger @($t1, $t2) -Settings $settings -Principal $principal -Force
++
++try {
++    $srv = New-Object -ComObject 'Schedule.Service'
++    $srv.Connect()
++    $task = $srv.GetFolder('\').GetTask('CMP30HX_Gen2_Unlock')
++    $def = $task.Definition
++    
++    $tEvent = $def.Triggers.Create(0)
++    $tEvent.Subscription = '<QueryList><Query Id="0" Path="System"><Select Path="System">*[System[Provider[@Name="Microsoft-Windows-Power-Troubleshooter"] and EventID=1]]</Select></Query></QueryList>'
++    $tEvent.Delay = 'PT3S'
++    $tEvent.Enabled = $true
++    
++    $srv.GetFolder('\').RegisterTaskDefinition('CMP30HX_Gen2_Unlock', $def, 4, $null, $null, 5, $null)
++} catch {
++    Write-Warning "Failed to add Event trigger: $_"
++}
+diff --git a/scripts/Restart-NVDisplay.ps1 b/scripts/Restart-NVDisplay.ps1
+new file mode 100644
+index 0000000..7391209
+--- /dev/null
++++ b/scripts/Restart-NVDisplay.ps1
+@@ -0,0 +1,6 @@
++Restart-Service -Name 'NVDisplay.ContainerLocalSystem' -Force -ErrorAction SilentlyContinue
++Start-Sleep -Seconds 1
++$s = Get-Service -Name 'NVDisplay.ContainerLocalSystem' -ErrorAction SilentlyContinue
++if ($s -and $s.Status -ne 'Running') {
++    Start-Service -Name 'NVDisplay.ContainerLocalSystem' -ErrorAction SilentlyContinue
++}
+diff --git a/scripts/Restart-NvidiaGPU.ps1 b/scripts/Restart-NvidiaGPU.ps1
+new file mode 100644
+index 0000000..542ddb0
+--- /dev/null
++++ b/scripts/Restart-NvidiaGPU.ps1
+@@ -0,0 +1,33 @@
++$devs = Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | Where-Object { $_.HardwareID -match 'VEN_10DE&(DEV_2189|DEV_1F0B)' }
++
++if ($devs) {
++    foreach ($d in $devs) {
++        try { & pnputil /restart-device $d.InstanceId >$null 2>&1 } catch {}
++        try {
++            Disable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction SilentlyContinue
++            Start-Sleep -Milliseconds 800
++            Enable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction SilentlyContinue
++        } catch {}
++        
++        try {
++            $st = (Get-PnpDevice -InstanceId $d.InstanceId -ErrorAction SilentlyContinue).Status
++            if ($st -ne 'OK') {
++                Enable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction SilentlyContinue
++            }
++        } catch {}
++    }
++    
++    Start-Sleep -Seconds 2
++    
++    try {
++        sc.exe config NVDisplay.ContainerLocalSystem start= auto | Out-Null
++        Restart-Service NVDisplay.ContainerLocalSystem -Force -ErrorAction SilentlyContinue
++        Start-Sleep -Seconds 1
++        $s = Get-Service -Name NVDisplay.ContainerLocalSystem -ErrorAction SilentlyContinue
++        if ($s -and $s.Status -ne 'Running') {
++            Start-Service NVDisplay.ContainerLocalSystem -ErrorAction SilentlyContinue
++        }
++    } catch {}
++} else {
++    Write-Host 'Khong tim thay Instance ID qua PnP'
++}
+diff --git a/scripts/Set-GpuPreference.ps1 b/scripts/Set-GpuPreference.ps1
+new file mode 100644
+index 0000000..fa495c3
+--- /dev/null
++++ b/scripts/Set-GpuPreference.ps1
+@@ -0,0 +1,26 @@
++$reg = 'HKCU:\Software\Microsoft\DirectX\UserGpuPreferences'
++if (-not (Test-Path $reg)) {
++    New-Item -Path $reg -Force | Out-Null
++}
++
++$found = 0
++$drives = (Get-PSDrive -PSProvider FileSystem).Root
++$targets = @(
++    'Riot Games\VALORANT\live\ShooterGame\Binaries\Win64\VALORANT-Win64-Shipping.exe',
++    'Riot Games\League of Legends\Game\League of Legends.exe'
++)
++
++foreach ($d in $drives) {
++    foreach ($sub in $targets) {
++        $p = Join-Path $d $sub
++        if (Test-Path $p) {
++            Set-ItemProperty -Path $reg -Name $p -Value 'GpuPreference=2;' -ErrorAction SilentlyContinue
++            $found++
++        }
++    }
++}
++
++if ($found -eq 0) {
++    Set-ItemProperty -Path $reg -Name (Join-Path $env:SystemDrive 'Riot Games\VALORANT\live\ShooterGame\Binaries\Win64\VALORANT-Win64-Shipping.exe') -Value 'GpuPreference=2;' -ErrorAction SilentlyContinue
++    Set-ItemProperty -Path $reg -Name (Join-Path $env:SystemDrive 'Riot Games\League of Legends\Game\League of Legends.exe') -Value 'GpuPreference=2;' -ErrorAction SilentlyContinue
++}
+diff --git a/scripts/Wait-And-Reset.ps1 b/scripts/Wait-And-Reset.ps1
+new file mode 100644
+index 0000000..a471ae8
+--- /dev/null
++++ b/scripts/Wait-And-Reset.ps1
+@@ -0,0 +1,36 @@
++Start-Sleep -Seconds 15
++$statusFile = [System.IO.Path]::Combine($env:ProgramData, '40HXUnlock\gen2_status.txt')
++
++if (Test-Path $statusFile) {
++    $c = Get-Content $statusFile -Raw
++    if ($c -match 'GPU TLS=Gen1|chua dat|chua d?t') {
++        $devs = Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | Where-Object { $_.HardwareID -match 'VEN_10DE&(DEV_2189|DEV_1F0B)' }
++        foreach ($d in $devs) {
++            try { & pnputil /restart-device $d.InstanceId >$null 2>&1 } catch {}
++            try {
++                Disable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction SilentlyContinue
++                Start-Sleep -Milliseconds 800
++                Enable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction SilentlyContinue
++            } catch {}
++            try {
++                $st = (Get-PnpDevice -InstanceId $d.InstanceId -ErrorAction SilentlyContinue).Status
++                if ($st -ne 'OK') {
++                    Enable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction SilentlyContinue
++                }
++            } catch {}
++        }
++        
++        Start-Sleep -Seconds 2
++        try {
++            Restart-Service NVDisplay.ContainerLocalSystem -Force -ErrorAction SilentlyContinue
++            Start-Sleep -Seconds 1
++        } catch {}
++        
++        $installerPath = Join-Path $pwd.Path '40HXInstaller.exe'
++        if (Test-Path $installerPath) {
++            Start-Process -FilePath $installerPath -ArgumentList '-gen2-30hx -silent' -Wait
++        }
++        
++        try { & 'nvidia-smi' -pm 1 } catch {}
++    }
++}
+diff --git a/windows-v3.0/tools/40hxcore/go.mod b/windows-v3.0/tools/40hxcore/go.mod
+index 028c7f5..ef9b9b3 100644
+--- a/windows-v3.0/tools/40hxcore/go.mod
++++ b/windows-v3.0/tools/40hxcore/go.mod
+@@ -3,3 +3,5 @@ module 40hxcore
+ go 1.26.5
+ 
+ require golang.org/x/sys v0.47.0
++
++require github.com/go-ole/go-ole v1.3.0 // indirect
+diff --git a/windows-v3.0/tools/40hxcore/go.sum b/windows-v3.0/tools/40hxcore/go.sum
+index 37ee2d4..b26bc3d 100644
+--- a/windows-v3.0/tools/40hxcore/go.sum
++++ b/windows-v3.0/tools/40hxcore/go.sum
+@@ -1,2 +1,5 @@
++github.com/go-ole/go-ole v1.3.0 h1:Dt6ye7+vXGIKZ7Xtk4s6/xVdGDQynvom7xCFEdWr6uE=
++github.com/go-ole/go-ole v1.3.0/go.mod h1:5LS6F96DhAwUc7C+1HLexzMXY1xGRSryjyPPKW6zv78=
++golang.org/x/sys v0.1.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
+ golang.org/x/sys v0.47.0 h1:o7XGOvZQCADBQQ4Y7VNq2dRWQR7JmOUW8Kxx4ZsNgWs=
+ golang.org/x/sys v0.47.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
+diff --git a/windows-v3.0/tools/40hxcore/link.go b/windows-v3.0/tools/40hxcore/link.go
+index 7aeea6b..ec16494 100644
+--- a/windows-v3.0/tools/40hxcore/link.go
++++ b/windows-v3.0/tools/40hxcore/link.go
+@@ -6,6 +6,11 @@ import (
+ 	"strings"
+ 	"syscall"
+ 	"time"
++	"unsafe"
++
++	"golang.org/x/sys/windows"
++	"golang.org/x/sys/windows/svc"
++	"golang.org/x/sys/windows/svc/mgr"
+ )
+ 
+ var (
+@@ -490,48 +495,112 @@ func (p *ProductionBus) WriteMMIO(physAddr uint64, val uint32) error {
+ }
+ 
+ func (p *ProductionBus) PnpResetDevice(devID uint16) bool {
+-	cmd := fmt.Sprintf("$devs = Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | Where-Object { $_.HardwareID -match 'DEV_%04X' }; foreach ($d in $devs) { try { & pnputil /restart-device $d.InstanceId >$null 2>&1 } catch {}; try { Disable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 800; Enable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction SilentlyContinue } catch {}; try { $st = (Get-PnpDevice -InstanceId $d.InstanceId -ErrorAction SilentlyContinue).Status; if ($st -ne 'OK') { Enable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction SilentlyContinue } } catch {} }", devID)
+-	_, err := RunOut("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd)
+-	return err == nil
++	devInfo, err := windows.SetupDiGetClassDevsEx(nil, "", 0, windows.DIGCF_ALLCLASSES|windows.DIGCF_PRESENT, 0, "")
++	if err != nil {
++		return false
++	}
++	defer windows.SetupDiDestroyDeviceInfoList(devInfo)
++
++	targetDev := fmt.Sprintf("DEV_%04X", devID)
++	success := false
++
++	for i := 0; ; i++ {
++		devInfoData, err := windows.SetupDiEnumDeviceInfo(devInfo, i)
++		if err != nil {
++			break
++		}
++
++		id, err := windows.SetupDiGetDeviceInstanceId(devInfo, devInfoData)
++		if err != nil {
++			continue
++		}
++
++		if strings.Contains(strings.ToUpper(id), targetDev) {
++			propChange := windows.PropChangeParams{
++				ClassInstallHeader: *windows.MakeClassInstallHeader(windows.DIF_PROPERTYCHANGE),
++				StateChange:        windows.DICS_PROPCHANGE,
++				Scope:              windows.DICS_FLAG_GLOBAL,
++				HwProfile:          0,
++			}
++
++			err = windows.SetupDiSetClassInstallParams(devInfo, devInfoData, &propChange.ClassInstallHeader, uint32(unsafe.Sizeof(propChange)))
++			if err == nil {
++				err = windows.SetupDiCallClassInstaller(windows.DIF_PROPERTYCHANGE, devInfo, devInfoData)
++				if err == nil {
++					success = true
++				} else {
++					// Fallback to Disable then Enable
++					propChange.StateChange = windows.DICS_DISABLE
++					windows.SetupDiSetClassInstallParams(devInfo, devInfoData, &propChange.ClassInstallHeader, uint32(unsafe.Sizeof(propChange)))
++					windows.SetupDiCallClassInstaller(windows.DIF_PROPERTYCHANGE, devInfo, devInfoData)
++
++					time.Sleep(800 * time.Millisecond)
++
++					propChange.StateChange = windows.DICS_ENABLE
++					windows.SetupDiSetClassInstallParams(devInfo, devInfoData, &propChange.ClassInstallHeader, uint32(unsafe.Sizeof(propChange)))
++					if err := windows.SetupDiCallClassInstaller(windows.DIF_PROPERTYCHANGE, devInfo, devInfoData); err == nil {
++						success = true
++					}
++				}
++			}
++		}
++	}
++	return success
+ }
+ 
+ func (p *ProductionBus) RestartNVDisplay() error {
++	m, err := mgr.Connect()
++	if err != nil {
++		return err
++	}
++	defer m.Disconnect()
++
++	s, err := m.OpenService("NVDisplay.ContainerLocalSystem")
++	if err != nil {
++		// Service không tồn tại trên hệ thống
++		return nil
++	}
++	defer s.Close()
++
+ 	// 1. Đảm bảo cấu hình service là auto để không bị vô hiệu hoá
+-	_, _ = RunOut("sc.exe", "config", "NVDisplay.ContainerLocalSystem", "start=", "auto")
++	conf, err := s.Config()
++	if err == nil && conf.StartType != mgr.StartAutomatic {
++		conf.StartType = mgr.StartAutomatic
++		s.UpdateConfig(conf)
++	}
+ 
+ 	// 2. Yêu cầu dừng service
+-	out, _ := RunOut("sc.exe", "stop", "NVDisplay.ContainerLocalSystem")
+-	if strings.Contains(string(out), "1060") {
+-		// Service không tồn tại trên hệ thống (không có driver NVIDIA)
+-		return nil
++	st, _ := s.Query()
++	if st.State != svc.Stopped {
++		s.Control(svc.Stop)
+ 	}
+ 
+-	// 3. Đợi service dừng hoàn toàn (chuyển sang trạng thái 1 STOPPED) thay vì sleep mù 500ms
++	// 3. Đợi service dừng hoàn toàn
+ 	for i := 0; i < 25; i++ { // tối đa 5 giây
+ 		time.Sleep(200 * time.Millisecond)
+-		qOut, err := RunOut("sc.exe", "query", "NVDisplay.ContainerLocalSystem")
+-		if err != nil || strings.Contains(string(qOut), "STOPPED") {
++		st, err := s.Query()
++		if err != nil || st.State == svc.Stopped {
+ 			break
+ 		}
+ 	}
+ 
+ 	// 4. Khởi động lại service
+-	_, err := RunOut("sc.exe", "start", "NVDisplay.ContainerLocalSystem")
++	s.Start()
+ 
+-	// 5. Xác nhận service đã ở trạng thái 4 RUNNING; nếu gặp lỗi 1056 (đang chuyển trạng thái) thì thử lại
++	// 5. Xác nhận service đã ở trạng thái 4 RUNNING
+ 	for i := 0; i < 25; i++ { // tối đa 5 giây
+ 		time.Sleep(200 * time.Millisecond)
+-		qOut, qErr := RunOut("sc.exe", "query", "NVDisplay.ContainerLocalSystem")
+-		if qErr == nil && strings.Contains(string(qOut), "RUNNING") {
++		st, err := s.Query()
++		if err == nil && st.State == svc.Running {
+ 			_, _ = RunOut("reg.exe", "add", `HKCR\Directory\Background\shellex\ContextMenuHandlers\NvCplDesktopContext`, "/ve", "/t", "REG_SZ", "/d", "{3D1975AF-48C6-4f8e-A182-BE0E08FA86A9}", "/f")
+ 			return nil
+ 		}
+-		if strings.Contains(string(qOut), "STOPPED") {
+-			_, err = RunOut("sc.exe", "start", "NVDisplay.ContainerLocalSystem")
++		if st.State == svc.Stopped {
++			s.Start()
+ 		}
+ 	}
+ 	_, _ = RunOut("reg.exe", "add", `HKCR\Directory\Background\shellex\ContextMenuHandlers\NvCplDesktopContext`, "/ve", "/t", "REG_SZ", "/d", "{3D1975AF-48C6-4f8e-A182-BE0E08FA86A9}", "/f")
+-	return err
++	return nil
+ }
+ 
+ func (p *ProductionBus) Sleep(d time.Duration) {
+diff --git a/windows-v3.0/tools/40hxcore/service.go b/windows-v3.0/tools/40hxcore/service.go
+index 38c1512..aab73de 100644
+--- a/windows-v3.0/tools/40hxcore/service.go
++++ b/windows-v3.0/tools/40hxcore/service.go
+@@ -1,16 +1,19 @@
+ package hxcore
+ 
+ import (
++	"fmt"
+ 	"os"
+ 	"path/filepath"
+-	"strings"
+ 	"time"
++
++	"github.com/go-ole/go-ole"
++	"github.com/go-ole/go-ole/oleutil"
++	"golang.org/x/sys/windows"
++	"golang.org/x/sys/windows/svc"
++	"golang.org/x/sys/windows/svc/mgr"
+ )
+ 
+ // Gen2StatusPath: %ProgramData%\40HXUnlock\gen2_status.txt
+-// 选 ProgramData(而非 LOCALAPPDATA) 是因为 Gen2 由 SYSTEM 计划任务执行:
+-// SYSTEM 的 LOCALAPPDATA 指向 SystemProfile, 用户态读不到; ProgramData 是
+-// 系统级公共目录, SYSTEM 可写、用户可读, 适合做"任务 → 用户"的状态通道。
+ func Gen2StatusPath() string {
+ 	base := os.Getenv("ProgramData")
+ 	if base == "" {
+@@ -20,7 +23,6 @@ func Gen2StatusPath() string {
+ }
+ 
+ // WriteGen2Status: Gen2 执行结果写入状态文件(供 40HXCheck 展示)。
+-// 权限不足时静默失败(不影响解锁主流程)。
+ func WriteGen2Status(text string) error {
+ 	p := Gen2StatusPath()
+ 	os.MkdirAll(filepath.Dir(p), 0o755)
+@@ -38,130 +40,153 @@ func ReadGen2Status() string {
+ }
+ 
+ // EnsureNvidiaControlPanelHealthy: Đảm bảo service NVDisplay.ContainerLocalSystem chạy (Auto)
+-// và phục hồi Shell Context Menu handler cho NVIDIA Control Panel để tránh biến mất.
+ func EnsureNvidiaControlPanelHealthy() error {
+-	_, _ = RunOut("sc.exe", "config", "NVDisplay.ContainerLocalSystem", "start=", "auto")
+-	qOut, _ := RunOut("sc.exe", "query", "NVDisplay.ContainerLocalSystem")
+-	if !strings.Contains(qOut, "RUNNING") {
+-		_, _ = RunOut("sc.exe", "start", "NVDisplay.ContainerLocalSystem")
++	m, err := mgr.Connect()
++	if err != nil {
++		return err
++	}
++	defer m.Disconnect()
++
++	s, err := m.OpenService("NVDisplay.ContainerLocalSystem")
++	if err != nil {
++		return err
++	}
++	defer s.Close()
++
++	conf, err := s.Config()
++	if err == nil && conf.StartType != mgr.StartAutomatic {
++		conf.StartType = mgr.StartAutomatic
++		s.UpdateConfig(conf)
++	}
++
++	st, err := s.Query()
++	if err == nil && st.State != svc.Running {
++		s.Start()
+ 		for i := 0; i < 20; i++ {
+ 			time.Sleep(150 * time.Millisecond)
+-			q, err := RunOut("sc.exe", "query", "NVDisplay.ContainerLocalSystem")
+-			if err == nil && strings.Contains(q, "RUNNING") {
++			if st, err := s.Query(); err == nil && st.State == svc.Running {
+ 				break
+ 			}
+ 		}
+ 	}
+-	_, err := RunOut("reg.exe", "add", `HKCR\Directory\Background\shellex\ContextMenuHandlers\NvCplDesktopContext`, "/ve", "/t", "REG_SZ", "/d", "{3D1975AF-48C6-4f8e-A182-BE0E08FA86A9}", "/f")
++	_, err = RunOut("reg.exe", "add", `HKCR\Directory\Background\shellex\ContextMenuHandlers\NvCplDesktopContext`, "/ve", "/t", "REG_SZ", "/d", "{3D1975AF-48C6-4f8e-A182-BE0E08FA86A9}", "/f")
+ 	return err
+ }
+ 
+ // ServiceInfo: 查询内核驱动服务。
+-// 返回 (是否存在, 启动类型 DEMAND/AUTO/DISABLED, 状态 RUNNING/STOPPED/…)
+ func ServiceInfo(name string) (bool, string, string) {
+-	out, err := RunOut("sc.exe", "query", name)
+-	if err != nil || !strings.Contains(out, "STATE") {
++	m, err := mgr.Connect()
++	if err != nil {
+ 		return false, "", ""
+ 	}
+-	state := "UNKNOWN"
+-	for _, ln := range strings.Split(out, "\n") {
+-		if strings.Contains(ln, "STATE") {
+-			t := strings.ToUpper(strings.TrimSpace(ln))
+-			switch {
+-			case strings.Contains(t, "RUNNING"):
+-				state = "RUNNING"
+-			case strings.Contains(t, "STOPPED"):
+-				state = "STOPPED"
+-			case strings.Contains(t, "START_PENDING"):
+-				state = "START_PENDING"
+-			}
++	defer m.Disconnect()
++
++	s, err := m.OpenService(name)
++	if err != nil {
++		return false, "", ""
++	}
++	defer s.Close()
++
++	st, err := s.Query()
++	stateStr := "UNKNOWN"
++	if err == nil {
++		switch st.State {
++		case svc.Running:
++			stateStr = "RUNNING"
++		case svc.Stopped:
++			stateStr = "STOPPED"
++		case svc.StartPending:
++			stateStr = "START_PENDING"
++		case svc.StopPending:
++			stateStr = "STOP_PENDING"
++		case svc.Paused:
++			stateStr = "PAUSED"
++		case svc.PausePending:
++			stateStr = "PAUSE_PENDING"
++		case svc.ContinuePending:
++			stateStr = "CONTINUE_PENDING"
+ 		}
+ 	}
+-	// 启动类型需 sc qc
++
+ 	stype := "UNKNOWN"
+-	if qc, err := RunOut("sc.exe", "qc", name); err == nil {
+-		t := strings.ToUpper(qc)
+-		switch {
+-		case strings.Contains(t, "DEMAND_START"):
++	if conf, err := s.Config(); err == nil {
++		switch conf.StartType {
++		case mgr.StartManual:
+ 			stype = "DEMAND"
+-		case strings.Contains(t, "AUTO_START"):
++		case mgr.StartAutomatic:
+ 			stype = "AUTO"
+-		case strings.Contains(t, "DISABLED"):
++		case mgr.StartDisabled:
+ 			stype = "DISABLED"
+-		case strings.Contains(t, "BOOT_START"):
++		case windows.SERVICE_BOOT_START:
+ 			stype = "BOOT"
+-		case strings.Contains(t, "SYSTEM_START"):
++		case windows.SERVICE_SYSTEM_START:
+ 			stype = "SYSTEM"
+ 		}
+ 	}
+-	return true, stype, state
++	return true, stype, stateStr
+ }
+ 
+-// TaskInfo: 查询计划任务。
+-// v2.5.1 关键修复: 兼容中文系统字段名。此前只认英文 "status:"/"last result:",
+-// 而 zh-CN 输出是 "模式:"/"上次结果:"(部分版本为 "状态:") — 导致已注册任务
+-// 被误判"未注册", 社区拿着误报诊断反复重装(与真实未注册难以区分)。
+-// 存在性以退出码为准(不存在时 schtasks 退出码 1), 不依赖字段解析。
+-// 返回 (是否存在, 状态 Ready/Running/已就绪…, 上次运行结果 "0"/"267011"…)
+-//
+-// v2.5.1 补丁(诊断仍误报"未注册"根因): 上述以 schtasks /query 退出码为唯一存在性
+-// 判据在中文/非管理员环境下会偶发误报——SYSTEM 主体的任务在部分机器上 /query 退出
+-// 非零(权限/代码页/瞬时服务抖动), 而任务 XML 文件其实已落盘。故改为:
+-//   **任务 XML 文件存在 = 权威存在性铁证**; schtasks /query 仅补充状态/结果字段。
+-// 只要文件在, 即判定已注册, 彻底消除"任务真在却诊断说没注册"的假阴性。
++// TaskInfo: 查询计划任务 (COM go-ole)。
+ func TaskInfo(name string) (bool, string, string) {
+-	out, err := RunOut("schtasks.exe", "/query", "/tn", name, "/fo", "LIST", "/v")
+-	status, lastResult := "", ""
+-	if err == nil || out != "" {
+-		for _, ln := range strings.Split(out, "\n") {
+-			t := strings.TrimSpace(ln)
+-			low := strings.ToLower(t)
+-			switch {
+-			case strings.HasPrefix(low, "status:"),
+-				strings.HasPrefix(t, "模式:"), strings.HasPrefix(t, "状态:"):
+-				status = strings.TrimSpace(t[strings.Index(t, ":")+1:])
+-			case strings.HasPrefix(low, "last result:"),
+-				strings.HasPrefix(t, "上次结果:"), strings.HasPrefix(t, "上次运行结果:"):
+-				lastResult = strings.TrimSpace(t[strings.Index(t, ":")+1:])
+-			}
+-		}
+-		// 状态字段个别版本叫 "计划任务状态:"(Scheduled Task State), 兜底采用
+-		if status == "" {
+-			for _, ln := range strings.Split(out, "\n") {
+-				t := strings.TrimSpace(ln)
+-				if strings.HasPrefix(t, "计划任务状态:") || strings.HasPrefix(strings.ToLower(t), "scheduled task state:") {
+-					status = strings.TrimSpace(t[strings.Index(t, ":")+1:])
+-					break
+-				}
+-			}
+-		}
+-		// 个别版本 "上次运行结果:" 之外的写法, 按 "结果:" 兜底
+-		if lastResult == "" {
+-			for _, ln := range strings.Split(out, "\n") {
+-				t := strings.TrimSpace(ln)
+-				if i := strings.Index(t, "结果:"); i >= 0 {
+-					lastResult = strings.TrimSpace(t[i+len("结果:"):])
+-					break
+-				}
+-			}
+-		}
++	if !taskXMLExists(name) {
++		return false, "", ""
++	}
++
++	ole.CoInitialize(0)
++	defer ole.CoUninitialize()
++
++	unknown, err := oleutil.CreateObject("Schedule.Service")
++	if err != nil {
++		return true, "已注册", ""
++	}
++	sched, err := unknown.QueryInterface(ole.IID_IDispatch)
++	if err != nil {
++		return true, "已注册", ""
++	}
++	defer sched.Release()
++
++	_, err = oleutil.CallMethod(sched, "Connect")
++	if err != nil {
++		return true, "已注册", ""
+ 	}
+-	// 存在性: schtasks 给出明确证据, 或任务 XML 文件真实存在(权威铁证)。
+-	// 文件存在即判定已注册, 不因 schtasks 退出码波动而误报。
+-	if status != "" || lastResult != "" ||
+-		strings.Contains(out, "TaskName") || strings.Contains(out, "任务名") ||
+-		taskXMLExists(name) {
+-		if status == "" {
+-			status = "已注册"
++
++	folderRes, err := oleutil.CallMethod(sched, "GetFolder", "\\")
++	if err != nil {
++		return true, "已注册", ""
++	}
++	folder := folderRes.ToIDispatch()
++	defer folder.Release()
++
++	taskRes, err := oleutil.CallMethod(folder, "GetTask", name)
++	if err != nil {
++		return true, "已注册", ""
++	}
++	task := taskRes.ToIDispatch()
++	defer task.Release()
++
++	status := "已注册"
++	if stateRes, err := oleutil.GetProperty(task, "State"); err == nil {
++		switch int(stateRes.Val) {
++		case 1:
++			status = "Disabled"
++		case 2:
++			status = "Queued"
++		case 3:
++			status = "Ready"
++		case 4:
++			status = "Running"
+ 		}
+-		return true, status, lastResult
+ 	}
+-	return false, "", ""
++
++	lastResult := ""
++	if resultRes, err := oleutil.GetProperty(task, "LastTaskResult"); err == nil {
++		lastResult = fmt.Sprintf("%v", resultRes.Value())
++	}
++
++	return true, status, lastResult
+ }
+ 
+-// taskXMLExists: 以 %SystemRoot%\System32\Tasks\<任务名> 文件存在性作为
+-// 计划任务已注册的权威判据。任务名中的 '\' 表示子文件夹(本工具任务为顶层, 无此情况)。
+-// 这是避开 schtasks /query 退出码竞态/权限误报的最可靠方式。
++// taskXMLExists:
+ func taskXMLExists(name string) bool {
+ 	sysroot := os.Getenv("SystemRoot")
+ 	if sysroot == "" {
+diff --git a/windows-v3.0/tools/40hxcore/state.go b/windows-v3.0/tools/40hxcore/state.go
+index c9cc2e5..5e38aa3 100644
+--- a/windows-v3.0/tools/40hxcore/state.go
++++ b/windows-v3.0/tools/40hxcore/state.go
+@@ -8,6 +8,8 @@ import (
+ 	"time"
+ 
+ 	"golang.org/x/sys/windows/registry"
++	"golang.org/x/sys/windows/svc"
++	"golang.org/x/sys/windows/svc/mgr"
+ )
+ 
+ // SS0 算力解锁寄存器偏移 (BAR0)
+@@ -247,12 +249,24 @@ func ReadUnlockStateV2(retries int, delayMs int) *UnlockState {
+ 	return st
+ }
+ 
+-// ScServiceRunning: 查询服务是否 RUNNING (sc.exe query)
++// ScServiceRunning: 查询服务是否 RUNNING
+ // 返回 false 表示查询失败或未运行。
+ func ScServiceRunning(name string) bool {
+-	out, err := RunOut("sc.exe", "query", name)
++	m, err := mgr.Connect()
+ 	if err != nil {
+ 		return false
+ 	}
+-	return strings.Contains(out, "RUNNING") || strings.Contains(strings.ToLower(out), "running")
++	defer m.Disconnect()
++
++	s, err := m.OpenService(name)
++	if err != nil {
++		return false
++	}
++	defer s.Close()
++
++	st, err := s.Query()
++	if err != nil {
++		return false
++	}
++	return st.State == svc.Running
+ }
+diff --git a/windows-v3.0/tools/40hxcore/uninstall_ops.go b/windows-v3.0/tools/40hxcore/uninstall_ops.go
+index 5560429..5d4b93f 100644
+--- a/windows-v3.0/tools/40hxcore/uninstall_ops.go
++++ b/windows-v3.0/tools/40hxcore/uninstall_ops.go
+@@ -13,7 +13,11 @@ import (
+ 	"strings"
+ 	"time"
+ 
++	"github.com/go-ole/go-ole"
++	"github.com/go-ole/go-ole/oleutil"
+ 	"golang.org/x/sys/windows/registry"
++	"golang.org/x/sys/windows/svc"
++	"golang.org/x/sys/windows/svc/mgr"
+ )
+ 
+ const bootDesc40 = "40HX Unlock"
+@@ -28,14 +32,31 @@ var UninstallTaskNames = []string{
+ 	"40HXGspEnsure",
+ }
+ 
+-// UninstallTasks: 删除计划任务, 返回实际删掉的名字
++// UninstallTasks: 删除计划任务, 返回实际删掉的名字 (使用 COM go-ole)
+ func UninstallTasks() []string {
+ 	var removed []string
+-	for _, tn := range UninstallTaskNames {
+-		out, err := RunOut("schtasks.exe", "/delete", "/tn", tn, "/f")
+-		if err == nil || strings.Contains(out, "成功") || strings.Contains(strings.ToLower(out), "success") {
+-			fmt.Printf("  Đã xoá tác vụ lịch trình %s\n", tn)
+-			removed = append(removed, tn)
++	
++	ole.CoInitialize(0)
++	defer ole.CoUninitialize()
++
++	unknown, err := oleutil.CreateObject("Schedule.Service")
++	if err == nil {
++		sched, err := unknown.QueryInterface(ole.IID_IDispatch)
++		if err == nil {
++			defer sched.Release()
++			if _, err := oleutil.CallMethod(sched, "Connect"); err == nil {
++				if folderRes, err := oleutil.CallMethod(sched, "GetFolder", "\\"); err == nil {
++					folder := folderRes.ToIDispatch()
++					defer folder.Release()
++					
++					for _, tn := range UninstallTaskNames {
++						if _, err := oleutil.CallMethod(folder, "DeleteTask", tn, 0); err == nil {
++							fmt.Printf("  Đã xoá tác vụ lịch trình %s\n", tn)
++							removed = append(removed, tn)
++						}
++					}
++				}
++			}
+ 		}
+ 	}
+ 	return removed
+@@ -119,17 +140,24 @@ func UninstallEspEfi() bool {
+ 
+ // UninstallDriverServices: 停止并删除历史驱动服务(v2.5 BYOVD + 旧版 bridge/early)
+ func UninstallDriverServices() {
+-	for _, name := range []string{"ThrottleStop", "40hx_bridge", "40hx_early", "40hx_early-d", "WinRing0_1_2_0", "WinRing0x64", "WinRing0"} {
+-		RunOut("sc.exe", "stop", name)
+-		time.Sleep(300 * time.Millisecond)
+-		out, err := RunOut("sc.exe", "delete", name)
+-		switch {
+-		case err == nil || strings.Contains(strings.ToLower(out), "success") || strings.Contains(out, "成功"):
+-			fmt.Printf("  Dịch vụ %s đã được xoá\n", name)
+-		case strings.Contains(out, "不存在") || strings.Contains(strings.ToLower(out), "not") || strings.Contains(out, "1060"):
+-			fmt.Printf("  Dịch vụ %s không tồn tại (bỏ qua)\n", name)
+-		default:
+-			fmt.Printf("  Xoá dịch vụ %s thất bại: %s\n", name, strings.TrimSpace(out))
++	m, err := mgr.Connect()
++	if err == nil {
++		defer m.Disconnect()
++		for _, name := range []string{"ThrottleStop", "40hx_bridge", "40hx_early", "40hx_early-d", "WinRing0_1_2_0", "WinRing0x64", "WinRing0"} {
++			s, err := m.OpenService(name)
++			if err != nil {
++				fmt.Printf("  Dịch vụ %s không tồn tại (bỏ qua)\n", name)
++				continue
++			}
++			s.Control(svc.Stop)
++			time.Sleep(300 * time.Millisecond)
++			err = s.Delete()
++			s.Close()
++			if err == nil {
++				fmt.Printf("  Dịch vụ %s đã được xoá\n", name)
++			} else {
++				fmt.Printf("  Xoá dịch vụ %s thất bại: %v\n", name, err)
++			}
+ 		}
+ 	}
+ 	_ = EnsureNvidiaControlPanelHealthy()
+@@ -208,7 +236,8 @@ func CheckLeftover() []string {
+ 	}
+ 	taskLeft := false
+ 	for _, tn := range UninstallTaskNames {
+-		if _, err := RunOut("schtasks.exe", "/query", "/tn", tn); err == nil {
++		exist, _, _ := TaskInfo(tn)
++		if exist {
+ 			rem = append(rem, "- Tác vụ lịch trình "+tn)
+ 			fmt.Println("  [!] Tác vụ lịch trình " + tn + " vẫn còn tàn dư")
+ 			taskLeft = true
+@@ -221,12 +250,16 @@ func CheckLeftover() []string {
+ 	// 卸载可能只删了服务注册、文件要重启后才能删, 不能假装干净。
+ 	svcNames := []string{"ThrottleStop", "40hx_bridge", "40hx_early", "40hx_early-d", "WinRing0_1_2_0", "WinRing0x64", "WinRing0"}
+ 	svcLeft := false
+-	for _, sn := range svcNames {
+-		if _, err := RunOut("sc.exe", "query", sn); err == nil {
+-			rem = append(rem, "- Dịch vụ driver "+sn)
+-			fmt.Println("  [!] Dịch vụ driver " + sn + " vẫn còn tàn dư (có thể vẫn đang chạy, hãy chạy lại gỡ cài đặt sau khi khởi động lại)")
+-			svcLeft = true
++	if m, err := mgr.Connect(); err == nil {
++		for _, sn := range svcNames {
++			if s, err := m.OpenService(sn); err == nil {
++				rem = append(rem, "- Dịch vụ driver "+sn)
++				fmt.Println("  [!] Dịch vụ driver " + sn + " vẫn còn tàn dư (có thể vẫn đang chạy, hãy chạy lại gỡ cài đặt sau khi khởi động lại)")
++				svcLeft = true
++				s.Close()
++			}
+ 		}
++		m.Disconnect()
+ 	}
+ 	if !svcLeft {
+ 		fmt.Println("  Dịch vụ driver: Đã dọn sạch")
