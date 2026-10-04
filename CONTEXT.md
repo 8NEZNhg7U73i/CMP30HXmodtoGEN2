@@ -39,3 +39,24 @@ _Avoid_: HardReset, ForceRecover, FallbackHack
 **MRRS 512B**:
 Maximum Read Request Size optimization configured in PCI Device Control to prevent DMA memory fragmentation and maximize bus throughput.
 _Avoid_: BufferTweak, DevctlHack, DmaBoost
+
+
+**MSHybrid (Microsoft Hybrid Graphics)**:
+The multi-adapter display architecture pairing headless discrete render GPU (EnableMsHybrid=1, FeatureScore=0xD1) with host scan-out adapter (EnableMsHybrid=2) over Desktop Window Manager (DWM).
+_Avoid_: OptimusHack, DualGpuFix, SwitchableGpu
+
+**CASO (Cross-Adapter Scan-Out)**:
+Hardware direct scan-out feature across PCIe bus allowing the display controller to scan out dGPU render buffers directly without intermediate blit copies (EnableCrossAdapterScanOut=1).
+_Avoid_: FastScanout, DirectPcie, CasoHack
+
+**Borderless Presentation**:
+DirectX client-area swapchain mode (WindowMode=2, BorderlessWindow=1) hosted by DWM compositor, circumventing zero-display EnumOutputs() DXGI crashes on headless CMP hardware.
+_Avoid_: FakeWindow, WindowedFix, DwmBypass
+
+**BYOVD Remediation**:
+The sanitization routine removing vulnerable third-party kernel drivers (WinRing0, ThrottleStop) and disabling testsigning to comply with Riot Vanguard (vgk.sys) and EAC anti-cheat code integrity.
+_Avoid_: DriverCleanup, AnticheatFix, KernelCleaner
+
+**DriverStore Authenticode**:
+Validation mechanism inspecting user-mode graphics binaries (nvwgf2umx.dll) inside System32/DriverStore/FileRepository to guarantee WHQL digital signature integrity without modified binary files.
+_Avoid_: SignatureCheck, CertValidator, WhqlInspector
